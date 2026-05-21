@@ -1,11 +1,13 @@
 import time
 import json
 from typing import Any, Dict, Optional, Type
+import re
+from pydantic import ValidationError
 
 import httpx
 from pydantic import BaseModel
 
-from .exceptions import APIError, InferenceGatewayError
+from .exceptions import APIError, InferenceGatewayError, ParsingError
 from .schemas import GatewayConfig, InferenceResult
 
 
@@ -129,5 +131,42 @@ class HuggingFaceGateway:
         }
 
     def _parse_response(self, raw_text: str, schema: Optional[Type[BaseModel]]) -> Dict[str, Any]:
-        """Parses the raw text response into JSON and validates against schema."""
-        raise NotImplementedError("Response parsing logic not yet implemented.")
+        """
+        Extracts JSON from the raw model response and validates it against the provided schema.
+        
+        Strategy:
+        1. Attempts to parse JSON from markdown code blocks first.
+        2. Falls back to extracting content between the first '{' and last '}' to handle 
+           conversational text that LLMs often append.
+        3. Validates against the optional Pydantic schema if provided.
+        """
+        cleaned_text = raw_text.strip()
+        
+        # Attempt 1: Extract from markdown code block (e.g., ```json ... ```)
+        json_match = re.search(r'```(?:json)?\s*\n(.*?)\n\s*```', cleaned_text, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1).strip()
+        else:
+            # Attempt 2: Fallback extraction for conversational text surrounding JSON
+            first_brace = cleaned_text.find('{')
+            last_brace = cleaned_text.rfind('}')
+            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                json_str = cleaned_text[first_brace:last_brace + 1]
+            else:
+                json_str = cleaned_text
+
+        # Parse JSON
+        try:
+            parsed_data = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            raise ParsingError(f"Failed to parse model output as JSON: {e}") from e
+
+        # Validate against schema if provided
+        if schema:
+            try:
+                validated_model = schema.model_validate(parsed_data)
+                return validated_model.model_dump()
+            except ValidationError as e:
+                raise ParsingError(f"Response validation failed against schema: {e}") from e
+
+        return parsed_data
