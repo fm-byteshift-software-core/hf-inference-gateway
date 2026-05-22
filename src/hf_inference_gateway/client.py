@@ -1,8 +1,6 @@
-import time
 import json
+import time
 from typing import Any, Dict, Optional, Type
-import re
-from pydantic import ValidationError
 
 import httpx
 from pydantic import BaseModel
@@ -12,7 +10,7 @@ from .schemas import GatewayConfig, InferenceResult
 
 
 class HuggingFaceGateway:
-    """Domain-agnostic client for the Hugging Face Inference API."""
+    """Domain-agnostic client for Hugging Face Router (OpenAI-compatible)."""
 
     def __init__(self, config: GatewayConfig):
         if not config.api_token.get_secret_value():
@@ -37,9 +35,6 @@ class HuggingFaceGateway:
         system_prompt: str,
         response_schema: Optional[Type[BaseModel]] = None,
     ) -> InferenceResult:
-        """
-        Executes the inference request against the configured model.
-        """
         start_time = time.time()
 
         try:
@@ -56,32 +51,49 @@ class HuggingFaceGateway:
                 model_id=self.config.model_id,
             )
         except Exception as e:
-            # Re-raise domain exceptions directly, wrap others
-            if isinstance(e, (APIError, InferenceGatewayError)):
+            if isinstance(e, (APIError, InferenceGatewayError, ParsingError)):
                 raise
             raise InferenceGatewayError(f"Unexpected error during inference: {e}") from e
 
+    def _build_payload(
+        self,
+        message: str,
+        context: Dict[str, Any],
+        system_prompt: str,
+    ) -> Dict[str, Any]:
+        final_system_content = system_prompt
+        if context:
+            context_json = json.dumps(context, indent=2, ensure_ascii=False)
+            final_system_content += f"\n\n### CURRENT CONTEXT ###\n{context_json}"
+
+        return {
+            "model": self.config.model_id,
+            "messages": [
+                {"role": "system", "content": final_system_content},
+                {"role": "user", "content": message}
+            ],
+            "temperature": 0.1
+        }
+
     def _send_request(self, payload: Dict[str, Any]) -> str:
-        """
-        Sends the HTTP POST request with retry logic and exponential backoff.
-        """
         last_exception = None
         
         for attempt in range(self.config.max_retries + 1):
             try:
                 response = self._client.post(
-                    f"/models/{self.config.model_id}",
+                    "/chat/completions",
                     json=payload,
                     headers=self._headers
                 )
                 response.raise_for_status()
-                return response.text
                 
+                data = response.json()
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    
             except httpx.HTTPStatusError as e:
                 last_exception = e
                 status_code = e.response.status_code
                 
-                # Do not retry on 4xx errors except rate limits (429)
                 if status_code == 429 or status_code >= 500:
                     if attempt < self.config.max_retries:
                         wait_time = min(2 ** attempt, 30)
@@ -99,55 +111,14 @@ class HuggingFaceGateway:
                 
         raise last_exception if last_exception else InferenceGatewayError("Max retries exceeded")
 
-    def _build_payload(
-        self,
-        message: str,
-        context: Dict[str, Any],
-        system_prompt: str,
-    ) -> Dict[str, Any]:
-        """
-        Constructs the standardized payload for the inference API.
-
-        Strategy:
-        1. Injects arbitrary 'context' as a structured JSON block within the system prompt.
-           This ensures the LLM has access to domain state (order details, etc.) 
-           without modifying the core logic of the module.
-        2. Formats the request as a conversation list (ChatML), which is the 
-           de-facto standard for Hugging Face's conversational endpoints.
-        """
-        # Inject context into system prompt if provided
-        final_system_content = system_prompt
-        if context:
-            # JSON format is preferred over plain text for LLMs to parse context reliably
-            context_json = json.dumps(context, indent=2, ensure_ascii=False)
-            final_system_content += f"\n\n### CURRENT CONTEXT ###\n{context_json}"
-
-        # Return the standard HF Inference payload structure
-        return {
-            "inputs": [
-                {"role": "system", "content": final_system_content},
-                {"role": "user", "content": message}
-            ]
-        }
-
     def _parse_response(self, raw_text: str, schema: Optional[Type[BaseModel]]) -> Dict[str, Any]:
-        """
-        Extracts JSON from the raw model response and validates it against the provided schema.
-        
-        Strategy:
-        1. Attempts to parse JSON from markdown code blocks first.
-        2. Falls back to extracting content between the first '{' and last '}' to handle 
-           conversational text that LLMs often append.
-        3. Validates against the optional Pydantic schema if provided.
-        """
         cleaned_text = raw_text.strip()
         
-        # Attempt 1: Extract from markdown code block (e.g., ```json ... ```)
+        import re
         json_match = re.search(r'```(?:json)?\s*\n(.*?)\n\s*```', cleaned_text, re.DOTALL)
         if json_match:
             json_str = json_match.group(1).strip()
         else:
-            # Attempt 2: Fallback extraction for conversational text surrounding JSON
             first_brace = cleaned_text.find('{')
             last_brace = cleaned_text.rfind('}')
             if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
@@ -155,18 +126,16 @@ class HuggingFaceGateway:
             else:
                 json_str = cleaned_text
 
-        # Parse JSON
         try:
             parsed_data = json.loads(json_str)
         except json.JSONDecodeError as e:
             raise ParsingError(f"Failed to parse model output as JSON: {e}") from e
 
-        # Validate against schema if provided
         if schema:
             try:
                 validated_model = schema.model_validate(parsed_data)
                 return validated_model.model_dump()
-            except ValidationError as e:
+            except Exception as e:
                 raise ParsingError(f"Response validation failed against schema: {e}") from e
 
         return parsed_data

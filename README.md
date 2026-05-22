@@ -4,7 +4,7 @@ Foundational, domain-agnostic client for the Hugging Face Inference API.
 
 ## Overview
 
-`hf-inference-gateway` provides a lightweight, framework-agnostic interface for interacting with Hugging Face's serverless inference endpoints. It abstracts transport, retry logic, timeout handling, and strict JSON validation while remaining completely independent of any specific business domain.
+`hf-inference-gateway` provides a lightweight, framework-agnostic interface for interacting with Hugging Face's Router endpoint (OpenAI-compatible) and standard inference APIs. It abstracts transport, retry logic, timeout handling, and strict JSON validation while remaining completely independent of any specific business domain.
 
 Designed for rapid prototyping and scalable architecture, this module can be integrated into any application requiring structured LLM responses without coupling to external business logic.
 
@@ -12,6 +12,7 @@ Designed for rapid prototyping and scalable architecture, this module can be int
 
 - Domain-agnostic design: Zero hardcoded business rules or vertical-specific terminology
 - Configurable model routing: Support any Hugging Face model via dynamic `model_id` injection
+- OpenAI-compatible format: Native support for `/chat/completions` workflows
 - Automatic retry logic: Exponential backoff with configurable limits and smart error filtering
 - Strict response validation: Optional Pydantic schema enforcement on model outputs
 - Timeout management: Configurable request deadlines with predictable failure modes
@@ -40,7 +41,8 @@ from hf_inference_gateway import HuggingFaceGateway, GatewayConfig
 # Initialize configuration
 config = GatewayConfig(
     api_token=os.getenv("HF_API_TOKEN"),
-    model_id="meta-llama/Meta-Llama-3-8B-Instruct",
+    model_id="meta-llama/Llama-3.1-8B-Instruct",
+    base_url="https://router.huggingface.co/v1",
     timeout=30.0,
     max_retries=2
 )
@@ -66,13 +68,13 @@ print(result.latency_ms)
 
 ## Configuration
 
-| Parameter     | Type    | Default                                | Description                                    |
-| ------------- | ------- | -------------------------------------- | ---------------------------------------------- |
-| `api_token`   | `str`   | Required                               | Hugging Face API authentication token          |
-| `model_id`    | `str`   | Required                               | Hugging Face model identifier                  |
-| `timeout`     | `float` | `30.0`                                 | Maximum request duration in seconds            |
-| `max_retries` | `int`   | `3`                                    | Number of retry attempts on transient failures |
-| `base_url`    | `str`   | `https://api-inference.huggingface.co` | Inference API endpoint                         |
+| Parameter     | Type    | Default                            | Description                                    |
+| ------------- | ------- | ---------------------------------- | ---------------------------------------------- |
+| `api_token`   | `str`   | Required                           | Hugging Face API authentication token          |
+| `model_id`    | `str`   | Required                           | Hugging Face model identifier                  |
+| `timeout`     | `float` | `30.0`                             | Maximum request duration in seconds            |
+| `max_retries` | `int`   | `3`                                | Number of retry attempts on transient failures |
+| `base_url`    | `str`   | `https://router.huggingface.co/v1` | Inference API endpoint (OpenAI-compatible)     |
 
 ## Error Handling
 
